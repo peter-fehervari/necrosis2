@@ -1,0 +1,313 @@
+---
+title: "Necrosis data analyses"
+author: "Peter Fehervari"
+date: "June 12, 2019"
+output: pdf_document
+---
+---
+title: "Necrosis preliminary analyses"
+author: "Peter Fehervari"
+date: "May 20, 2019"
+output:
+  pdf_document:
+    fig_caption: yes
+header-includes:
+ \floatplacement{figure}{H}
+ \usepackage{caption}
+ \captionsetup[figure]{labelformat=empty}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,fig.pos = 'H')
+options(scipen = 1, digits = 3)
+```
+
+
+```{r loadlibraries,echo=F, warning=FALSE,results='hide',message=FALSE}
+library(kableExtra)
+library(knitr)
+library(captioner)
+library(dplyr)
+library(ggplot2)
+library(party)
+library(RcmdrMisc)
+library(caret)
+library(VIM)
+library(PresenceAbsence)
+library(randomForestSRC)
+library(LiblineaR)
+```
+
+
+```{r dataimport, echo=F}
+adat=read.table("Nekrozis_24parameter_1.0.csv",h=T,sep=",")
+adat2=adat[,-1]
+```
+
+
+```{r captioner_defs_tabs}
+table_nums <- captioner(prefix = "Table") 
+tab_1_cap <- table_nums(name="tab_1", caption = "Summary statistics of male fruitfly lifespan (days) by treatment groups")
+
+
+```
+
+```{r captioner_defs_figs}
+fig_nums <- captioner(prefix = "Figure") 
+
+fig_1_cap <- fig_nums(name="fig_1", caption = "Missing value patterns of descriptor variables across the dataset. Red indicates missingness.")
+
+fig_2_cap <- fig_nums(name="fig_2", caption = "Missing value combinations wher the height of the rows is proportional to the number of existing cominations. Note that the number of records with no missing data (all blue row) is lower than that of records with several missing predictor combinations. The bars on the top of the figure are proportional to the number of missing valeus of the variable. Red indicates missingness. ")
+
+```
+
+
+
+#Introduction
+
+#Aims
+
+Predict the probability of necrosis from blood parameters.  
+
+#Analyses
+
+##General overview
+
+##Descriptive and explorative statistics
+
+The total number of records is **`r nrow(adat)`** out of which **`r round(sum(adat$Necrosis,na.rm=T)/nrow(adat)*100,1)`%**  had necrosis. The largest problem with the dataset is the large number of missing values;  `r round(sum(is.na(adat2))/(ncol(adat2[,-1])*nrow(adat2[,-1]))*100,1)`% of all the potential descriptor values are NAs. Moreover, the patterns of NA's on a single variable level are non-random (see *`r fig_nums('fig_1', display="cite")`* and *`r fig_nums('fig_2', display="cite")`*). Apparently, there are two types of variables with high propotion of missingness; 1) where NA's are in large chunks, presumably indicating a not missing at random pattern (NMAR), and 2) a pattern where NA's are seemingly independent from  the index (missing at random; MAR). 
+ `
+
+```{r matrix_plot_ori_data, fig.cap=fig_1_cap}
+matrixplot(adat2,cex.axis=0.6,cex.axis=0.5,xlab="Descriptor variables")
+```
+
+Looking at the missing data combinations, it is apparent that complete observations are not the most common record types, *`r fig_nums('fig_2', display="cite")`*. The dataset in its current state is probably useless for predictive modelling as most methods need complete observations. To salvage the information in the variables, I used the following approach; 1) exclude variables with more than 35% missing values, 2) impute missing values using the k-Nearest Neighbour Imputation method (cit), 3) predictive modelling using ...
+
+Below is the list of variables included in the analyses
+
+
+```{r fig.cap=fig_2_cap}
+varNAratio=aggr(adat2,bars=T,combined=T,sortVars=T,sortCombs=T,cex.numbers=1,varheight=T,only.miss=F,cex.axis=0.5)
+```
+```{r}
+varNAratio2=varNAratio$missings
+varNAratio2$percent=round(varNAratio2$Count/nrow(adat2)*100,1)
+varNAration2=varNAratio2[order(varNAratio2$percent),]
+adat3=adat2[,row.names(varNAratio2[varNAratio2$percent<35,])]
+adat3
+```
+
+
+```{r}
+adat4=kNN(adat3[,-1],k=10,imp_var = F)
+adat4
+```
+
+## Predictive modeling
+
+In general, available predictive models and ML algorithms may have large differences in predictive performance across datasets. The aim here is to maximize predictive performance, therefore I will apply several algorithms with highly different approaches and compare their performances. Performance comparison will be done at two levels, first I will randomly partition the available dataset to a training and testing subset (70% and 30% respectively). Modeling, within model and between model performances will be evaluated on these subsets. The best performing model will then be used to predict a separate, dataset where the outcome variable is unknown. The predictions will be then evaluated by a third party to ensure blind model performance evaluation. For all models I will use a 5 fold cross validation approach repeated 3 times. Model parameter settings will be tested using a parameter space tuning grids detailed specifically for each algorithm.
+
+Initally, I selected Bayesian Logistic Regression, CART, RandomForest, Generlaized Boosted Models, Support Vector Machines, and Bayesian regularized Neural Networks. 
+
+
+
+```{r trainnigdataprep}
+library(mlbench)
+adat4$Necrosis=factor(adat3$Necrosis)
+adat4=na.omit(adat4)
+levels(adat4$Necrosis)=c("No_necrosis","Necrosis")
+adat4$Necrosis=relevel(adat4$Necrosis,ref = "Necrosis")
+
+set.seed(666)
+
+inTrain=createDataPartition(y=adat4$Necrosis,p=.80,list = FALSE,times=1)
+training=adat4[inTrain,]
+testing=adat4[-inTrain,]
+summary(training)
+summary(testing)
+
+customSummary <- function (data, lev = NULL, model = NULL){
+  spec <- specificity(data[, "pred"], data[, "obs"])
+  pred <- factor(ifelse(data[, "neg"] > 0.5, "neg", "pos"))
+  spec2 <- specificity(pred, data[, "obs"], "pos")
+  speclist <- as.numeric()
+  for(i in seq(0.1, 0.95, 0.05)){
+    predi <- factor(ifelse(data[, "neg"] > i, "neg", "pos"))
+    singlespec <- specificity(predi, data[, "obs"], "pos")
+    speclist <- c(speclist, singlespec)
+  }
+  max(speclist) -> specmax
+
+  out <- c(spec, spec2, specmax)
+
+  names(out) <- c("Spec", "Spec2", "Specmax")
+  out
+}
+
+
+fourStats <- function (data, lev = levels(data$obs), model = NULL) {
+  ## This code will get use the area under the ROC curve and the
+  ## sensitivity and specificity values using the current candidate
+  ## value of the probability threshold.
+  out <- c(twoClassSummary(data, lev = levels(data$obs), model = NULL))
+ 
+  ## The best possible model has sensitivity of 1 and specifity of 1. 
+  ## How far are we from that value?
+  coords <- matrix(c(1, 1, out["Spec"], out["Sens"]), 
+                   ncol = 2, 
+                   byrow = TRUE)
+  colnames(coords) <- c("Spec", "Sens")
+  rownames(coords) <- c("Best", "Current")
+  c(out, Dist = dist(coords)[1])
+}
+
+fitControl <- trainControl(
+                           method = "repeatedcv",
+                           number = 5,
+                           repeats=3,
+                           summaryFunction = customSummary,
+                           classProbs = T)
+```
+
+```{r BayesLogReg}
+
+
+BayesLogRegFit <- train(Necrosis ~ ., data = training, 
+                 method = "bayesglm", 
+                 trControl = fitControl,
+                 na.action = na.pass,
+                 metric="Sens")
+specificity()
+
+BayesLogRegFit
+getTrainPerf(BayesLogRegFit)
+confusionMatrix(predict(BayesLogRegFit,newdata = testing,type="raw"),reference = testing$Necrosis)
+
+```
+```{r CART}
+cart2Grid <-  expand.grid(maxdepth = c(3:12), mincriterion=c(0.05,0.01,0.001))
+
+cartFit1 <- train(Necrosis ~ ., data = training, 
+                 method = "ctree2", 
+                 trControl = fitControl,
+                 na.action = na.pass,
+                 metric="Dist",
+                 tuneGrid = cart2Grid)
+
+cartFit1
+ggplot(cartFit1)
+getTrainPerf(cartFit1)
+
+predict(cartFit1,newdata = testing,type = "prob")
+confusionMatrix(predict(cartFit1,newdata = testing),reference = testing$Necrosis)
+ctreeImp=varImp(cartFit1,scale = F)
+plot(ctreeImp)
+
+```
+
+```{r cforest}
+cforestGrid <-  expand.grid(mtry = c(3:10))
+
+
+cforestFit <- train(Necrosis ~ ., data = training, 
+                 method = "cforest", 
+                 trControl = fitControl,
+                 na.action = na.pass,
+                 metric="ROC",
+                 tuneGrid = cforestGrid)
+
+cforestFit
+plot(cforestFit)
+confusionMatrix(predict(cforestFit,newdata = testing,type="raw"),reference = testing$Necrosis)
+cforestImp=varImp(cforestFit,scale = F)
+plot(cforestImp)
+
+```
+
+
+
+```{r gbm eval=FALSE, include=FALSE}
+
+gbmGrid <-  expand.grid(interaction.depth = c(2:10), 
+                        n.trees = (10:30)*50, 
+                        shrinkage = 0.05,
+                        n.minobsinnode = 2)
+
+
+gbmFit <- train(Necrosis ~ ., data = training, 
+                 method = "gbm", 
+                 trControl = fitControl,
+                 na.action = na.pass,
+                 metric="Dist",
+                 tuneGrid = gbmGrid)
+
+gbmFit
+plot(gbmFit,metric="Dist")
+
+library(gbm)
+confusionMatrix(predict(gbmFit,newdata = testing,type="raw"),reference = testing$Necrosis)
+gbmImp=varImp(gbmFit,scale = F)
+plot(gbmImp)
+```
+
+
+```{r svm}
+svmGrid <-  expand.grid(C=c(0.00001,0.0001,0.001,0.1,0.25,0.5,1),
+                      scale=c(0.00001,0.0001,0.001,0.1,0.25),
+                      degree=1:5)
+
+fitControl2 <- trainControl(
+                           method = "repeatedcv",
+                           number = 5,
+                           repeats=3)
+                    #       summaryFunction = twoClassSummary,
+                    #       classProbs = T)
+
+svmFit <- train(Necrosis ~ ., data = training,
+                 method = "svmPoly", 
+                 trControl = fitControl2,
+                 na.action = na.pass,
+                tuneGrid=svmGrid,
+                metric="ROC")
+svmFit
+confusionMatrix(predict(svmFit,newdata = testing,type="raw"),reference = testing$Necrosis)
+
+svmImp=varImp(svmFit,scale = F)
+plot(svmImp)
+
+```
+```{r neuralnetwork}
+nnGrid <-  expand.grid(neurons=3:20)
+
+
+nnFit <- train(Necrosis ~ ., data = training, 
+                 method = "nnet", 
+                 trControl = fitControl,
+                 na.action = na.pass,
+                 metric="Sensitivity")
+
+nnFit
+plot(nnFit,metric="Dist")
+
+confusionMatrix(predict(nnFit,newdata = testing,type="raw"),reference = testing$Necrosis)
+nnImp=varImp(nnFit,scale = F)
+plot(nnImp)
+```
+```{r}
+valid=read.table("adattabla_validalasra_csaklabor_work2.csv",h=T,sep=",")
+
+lift_results <- data.frame(Class = testing$Necrosis)
+lift_results$BLogReg <- predict(BayesLogRegFit,newdata=testing, type = "prob")[,"Necrosis"]
+lift_results$CART <- predict(cartFit1,testing, type = "prob")[,"Necrosis"]
+lift_results$RF <- predict(cforestFit,testing, type = "prob")[,"Necrosis"]
+lift_results$GBM <- predict(gbmFit,testing, type = "prob")[,"Necrosis"]
+lift_results$NN <- predict(nnFit,testing, type = "prob")[,"Necrosis"]
+
+trellis.par.set(caretTheme())
+lift_obj <- lift(Class ~ BLogReg + CART+RF+GBM+NN, data = lift_results)
+plot(lift_obj, values = 90, auto.key = list(columns = 3,
+                                            lines = TRUE,
+                                            points = FALSE))
+```
+

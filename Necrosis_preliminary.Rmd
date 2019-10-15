@@ -1,0 +1,167 @@
+---
+title: "Necrosis preliminary analyses"
+author: "Peter Fehervari"
+date: "May 20, 2019"
+output:
+  pdf_document:
+    fig_caption: yes
+header-includes:
+ \floatplacement{figure}{H}
+ \usepackage{caption}
+ \captionsetup[figure]{labelformat=empty}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,fig.pos = 'H')
+options(scipen = 1, digits = 3)
+```
+
+
+```{r loadlibraries,echo=F, warning=FALSE,results='hide',message=FALSE}
+library(kableExtra)
+library(knitr)
+library(captioner)
+library(dplyr)
+library(ggplot2)
+library(party)
+library(RcmdrMisc)
+library(caret)
+library(VIM)
+library(PresenceAbsence)
+library(randomForestSRC)
+library(LiblineaR)
+library(DMwR)
+
+```
+
+
+```{r dataimport, echo=F}
+trainingData=read.table("Necrosis_short_all_data_GULASH.csv",sep=",",h=T)
+trainingData$Necrosis=factor(trainingData$Necrosis)
+levels(trainingData$Necrosis)=c("No_necrosis","Necrosis")
+trainingData$Necrosis=relevel(trainingData$Necrosis,ref="No_necrosis")
+trainingData2=trainingData[,-1:-4]
+
+
+
+testingData=read.table("Nekrozis_24parameter_1.0.csv",sep=",",h=T)
+testingData$Necrosis=factor(testingData$Necrosis)
+levels(testingData$Necrosis)=c("No_necrosis","Necrosis")
+testingData$Necrosis=relevel(testingData$Necrosis,ref="No_necrosis")
+testingData2=testingData[,-1]
+```
+
+
+```{r captioner_defs_tabs}
+table_nums <- captioner(prefix = "Table") 
+tab_1_cap <- table_nums(name="tab_1", caption = "Summary statistics of male fruitfly lifespan (days) by treatment groups")
+
+
+```
+
+```{r captioner_defs_figs}
+fig_nums <- captioner(prefix = "Figure") 
+
+fig_1_cap <- fig_nums(name="fig_1", caption = "Missing value patterns of descriptor variables across the dataset. Red indicates missingness.")
+
+fig_2_cap <- fig_nums(name="fig_2", caption = "Missing value combinations where the height of the rows is proportional to the number of existing cominations. Note that the number of records with no missing data (all blue row) is lower than that of records with several missing predictor combinations. The bars on the top of the figure are proportional to the number of missing valeus of the variable. Red indicates missingness. ")
+
+fig_3_cap <- fig_nums(name="fig_3", caption = "Conditional inference tree on Necrosis by select blood parameters")
+
+```
+
+
+
+#Aims
+
+Predict the probability of necrosis in patients with pancreatitis from blood parameters in a fashion that allows sensible in situ predictions for clinical MDs. The gold standard for necrosis diagnostics is a CT scan, which is costly and time consuming. Since only a fraction of patients develop necrosis post pancretitis, it is desirable to effectively filter low risk individuals, and require CT scans for high risk patients. 
+#Analyses
+
+## Data description and management
+
+### Handling missing values
+
+Two distinct datasets each with a similar set of predictors were made available for the analyses. Both datasets had unique patient identifiers, a variable indicating whether the patient suffered from necrosis and `r ncol(trainingData)-1` blood parameters. The first dataset (n= `r nrow(trainingData)`) had a total of `r sum(is.na(trainingData))` missing values, however the second, larger dataset (n = `r nrow(testingData)`) had considerably more (`r sum(is.na(testingData))`). Moreover, the patterns of NA's on a single variable level are non-random (see *`r fig_nums('fig_1', display="cite")`* and *`r fig_nums('fig_2', display="cite")`*). Apparently, there are two types of variables with high propotion of missingness; 1) where NA's are in large chunks, presumably indicating a not missing at random pattern (NMAR), and 2) a pattern where NA's are seemingly independent from  the index (missing at random; MAR).   
+
+```{r matrix_plot_ori_data, fig.cap=fig_1_cap}
+matrixplot(testingData,cex.axis=0.6,cex.axis=0.5,xlab="Descriptor variables")
+```
+
+Looking at the missing data combinations, it is apparent that complete observations are not the most common record types, *`r fig_nums('fig_2', display="cite")`*. 
+
+
+
+```{r fig.cap=fig_2_cap}
+varNAratio=aggr(testingData2,plot=F)
+plot(varNAratio,bars=T,combined=T,sortCombs=T,cex.numbers=1,varheight=T,only.miss=F,cex.axis=0.5,prop=T)
+```
+
+The larger dataset in its current state is probably useless for predictive modelling as most methods need complete observations. To salvage the information in the variables, I used the following approach; 1) exclude variables with more than 35% missing values in the larger dataset from both datasets, 2) impute missing values using the k-Nearest Neighbour Imputation method [^1] in both datasets.
+
+The following variables were included in all further analyses:
+```{r}
+#preselect variables that have more than 35% NAs
+varNAratio2=varNAratio$missings
+varNAratio2$percent=round(varNAratio2$Count/nrow(testingData)*100,1)
+varNAration2=varNAratio2[order(varNAratio2$percent),]
+testingData3=testingData2[,row.names(varNAratio2[varNAratio2$percent<35,])]
+trainingData3=trainingData2[,row.names(varNAratio2[varNAratio2$percent<35,])]
+
+#data imputation
+testingData4=VIM::kNN(testingData3,k=5,imp_var = F)
+trainingData4=VIM::kNN(trainingData3,k=5,imp_var = F)
+
+names(testingData4)
+```
+
+
+[^1]: A. Kowarik, M. Templ (2016) Imputation with R package VIM. Journal of Statistical Software, 74(7), 1-16
+
+*The smaller dataset with less missing value imputations was used to train all models described below (hereafter: **Training Data**), while the larger dataset was used to assess model predictive performance (hereafter: **Testing Data**)*
+
+### Unbalanced data handling
+The incidence rate of necrosis is low, resulting in highly unbalanced Training and Testing Data. I used the Syntethic Minority Oversampling (SMOTE [^2]) algorithm to create new examples of the minority class in the Training Data  (records with necrosis) to enable more efficient model training.  
+
+[^2]: Chawla, N. V., Bowyer, K. W., Hall, L. O., and Kegelmeyer, W. P. (2002). Smote: Synthetic minority over-sampling technique. Journal of Artificial Intelligence Research, 16:321-357.
+
+
+```{r}
+trainingData4SMOTE=SMOTE(Necrosis~.,data=trainingData4,perc.over = 300, perc.under = 300)
+```
+
+## Predictive modeling
+
+I used Conditional Inference Tree[^3] to model the relationship of candidate predictors and the target variable. The tree was pruned to maximum depth of 2 levels to ease the biological interpretation of results.
+
+[^3]:Torsten Hothorn, Kurt Hornik and Achim Zeileis (2006). Unbiased Recursive Partitioning: A Conditional Inference Framework. Journal of Computational and Graphical Statistics, 15(3), 651–674. Preprint available from http://statmath.wu-wien.ac.at/~zeileis/papers/Hothorn+Hornik+Zeileis-2006.pdf
+
+# Results
+The conditional tree fitted on the Trainig Data shows that three variables play a major role in predicting necrosis, namely Glucose, Lipase and Hemoglobin *`r fig_nums('fig_3', display="cite")`*. 
+
+```{r fig.cap=fig_3_cap}
+
+ctl=ctree_control(testtype = "Teststatistic",minbucket = 10, maxdepth = 2)
+fa1=ctree(Necrosis~.,data=trainingData4SMOTE,control=ctl)
+plot(fa1)
+```
+
+```{r}
+ooL=predict(fa1 ,newdata = testingData4,type="prob")
+ooL2=unlist(ooL)[seq(from=0,to=length(unlist(ooL)),by=2)]
+testingData4$fa1=ooL2
+```
+
+The predictive performance of this model was evaluated on the Testing Data. First we calculated the predicted probablities of all records, to later assess the threshold probability values that allow the maximum sensitivity+specificity predictions. We later used this threshold to classify observations to Necrosis or No_necrosis categories. Below is the confusion matrix of predicted and observed necrosis values and the ROC curve.
+
+```{r, warning=FALSE}
+DATA=data.frame(cbind(1:nrow(testingData4),
+           as.numeric(testingData4$Necrosis)-1,
+           testingData4$fa1))
+
+othresholds=optimal.thresholds(DATA,req.spec =0.75)
+
+cmx(DATA,threshold = othresholds[3,2])
+
+auc.roc.plot(DATA)
+```
+
